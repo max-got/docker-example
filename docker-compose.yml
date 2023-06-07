@@ -1,0 +1,79 @@
+version: '3.9'
+name: docker-example-wi
+
+services:
+  server:
+    build:
+      context: ./apps/server
+      dockerfile: Dockerfile
+    restart: always
+    container_name: prisma-express-api
+    ports:
+      - '3221:3221'
+    depends_on:
+      - db
+    networks:
+      - app-network
+  db:
+    image: postgres
+    container_name: postgres
+    hostname: postgres
+    ports:
+      - '5432:5432'
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    restart: always
+    networks:
+      - app-network
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-U', 'postgres']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+  adminer:
+    image: adminer
+    container_name: adminer
+    restart: always
+    ports:
+      - 8080:8080
+  student:
+    build:
+      context: ./apps/student
+      dockerfile: Dockerfile
+    restart: always
+    container_name: student-app
+    ports:
+      - '5050:5050'
+    networks:
+      - app-network
+    depends_on:
+      server:
+        condition: service_healthy
+        restart: true
+      db:
+        condition: service_healthy
+        restart: true
+  prof:
+    build:
+      context: ./apps/prof
+      dockerfile: Dockerfile
+    restart: always
+    container_name: prof-app
+    ports:
+      - '5053:5053'
+    networks:
+      - app-network
+    depends_on:
+      server:
+        condition: service_healthy
+        restart: true
+      db:
+        condition: service_healthy
+        restart: true
+
+networks:
+  app-network:
+    driver: bridge

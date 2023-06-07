@@ -2,181 +2,161 @@
 
 Ein simples Beispiel wie eine [SvelteKit](https://kit.svelte.dev/) App in einem Docker Container deployed werden kann.
 
-## Dockerfile
+## Docker Compose
+
+```yaml
+version: '3.9' # use docker-compose version 3.9
+name: docker-example-wi # name of the docker-compose project
+
+services: # define the services
+  server: # define the server service
+    build: # build the server service
+      context: ./apps/server # build the server service in the ./apps/server directory
+      dockerfile: Dockerfile # use the Dockerfile in the ./apps/server directory
+    restart: always # restart the server service always
+    container_name: prisma-express-api # name the container prisma-express-api
+    ports: # open the ports
+      - '3221:3221' # open the port 3221
+    depends_on: # define the dependencies
+      - db # the server service depends on the db service
+    networks: # define the networks
+      - app-network # the server service is in the app-network
+  db: # define the db service
+    image: postgres # use the offical postgres image
+    container_name: postgres
+    hostname: postgres # set the hostname to postgres
+    ports:
+      - '5432:5432'
+    environment: # define the environment variables
+      POSTGRES_USER: postgres # set the POSTGRES_USER to postgres
+      POSTGRES_PASSWORD: postgres # set the POSTGRES_PASSWORD to postgres
+      POSTGRES_DB: postgres # set the POSTGRES_DB to postgres
+    restart: always
+    networks:
+      - app-network
+    healthcheck: # define the healthcheck
+      test: ['CMD', 'pg_isready', '-U', 'postgres'] # test if the postgres server is ready
+      interval: 10s # check every 10 seconds
+      timeout: 5s # timeout after 5 seconds
+      retries: 5 # retry 5 times
+      start_period: 5s # start after 5 seconds
+
+  adminer:
+    image: adminer
+    container_name: adminer
+    restart: always
+    ports:
+      - 8080:8080
+
+  student:
+    build:
+      context: ./apps/student
+      dockerfile: Dockerfile
+    restart: always
+    container_name: student-app
+    ports:
+      - '5050:5050'
+    networks:
+      - app-network
+    depends_on:
+      server:
+        condition: service_healthy
+        restart: true
+      db:
+        condition: service_healthy
+        restart: true
+
+  prof: # define the prof service
+    build:
+      context: ./apps/prof
+      dockerfile: Dockerfile
+    restart: always
+    container_name: prof-app
+    ports:
+      - '5053:5053'
+    networks:
+      - app-network
+    depends_on:
+      server:
+        condition: service_healthy
+        restart: true
+      db:
+        condition: service_healthy
+        restart: true
+
+networks: # define the networks
+  app-network: # define the app-network
+    driver: bridge # use the bridge driver https://docs.docker.com/network/drivers/bridge/
+```
+
+## Dockerfile - Apps
 
 ```dockerfile
+#Wir bauen unsere App in einem ersten Schritt in einem Node Image node:18-alpine mit dem alias builder
 FROM node:18-alpine AS builder
-WORKDIR /app
+#Wir setzen das Arbeitsverzeichnis auf `/apps/prof`
+WORKDIR /apps/prof
+#Wir kopieren die `package.json` und `package-lock.json` in das Arbeitsverzeichnis
 COPY package*.json .
+#Wir installieren die Dependencies
 RUN npm ci
+#Wir kopieren den Rest der App in das Arbeitsverzeichnis
 COPY . .
+#Wir bauen die App mit `npm run build` in diesem Fall mit der Adapter `node` SvelteKit Adapter
 RUN npm run build
+#Wir entfernen alle Dependencies die wir nicht für die Produktion brauchen
 RUN npm prune --production
 
+#Wir bauen ein neues Image mit dem Node Image `node:18-alpine`
 FROM node:18-alpine
-WORKDIR /app
-COPY --from=builder /app/build build/
-COPY --from=builder /app/node_modules node_modules/
+#Wir setzen das Arbeitsverzeichnis auf `/apps/prof`
+WORKDIR /apps/prof
+#Wir kopieren den `build` Ordner aus dem `builder` Image in das Arbeitsverzeichnis
+COPY --from=builder /apps/prof/build build/
+#Wir kopieren den `node_modules` Ordner aus dem `builder` Image in das Arbeitsverzeichnis
+COPY --from=builder /apps/prof/node_modules node_modules/
+#Wir kopieren die `package.json` in das Arbeitsverzeichnis
 COPY package.json .
-EXPOSE 5050
-ENV NODE_ENV=production PORT=5050 VITE_NODE_ENV_DOCKER=docker
+#Wir öffnen den Port 5053
+EXPOSE 5053
+# Wir setzen die Umgebungsvariablen
+ENV NODE_ENV=production PORT=5053
+#Wir starten die App
 CMD [ "node", "build" ]
 ```
 
-### Was passiert hier?
-
-**1:**
+## Dockerfile - Server
 
 ```dockerfile
+# Wir bauen unsere App in einem ersten Schritt in einem Node Image node:18-alpine mit dem alias builder
 FROM node:18-alpine AS builder
-```
 
-Wir bauen unsere App in einem ersten Schritt in einem Node Image [node:18-alpine](https://hub.docker.com/_/node) mit dem alias `builder`
+# Wir setzen das Arbeitsverzeichnis auf `/server`
+WORKDIR /server
+# Wir kopieren die `package.json` und `package-lock.json` in das Arbeitsverzeichnis
+COPY package*.json ./
+# Wir kopierem den `prisma` Ordner in das Arbeitsverzeichnis (wird für die Generierung der Prisma Client Library benötigt -> ORM für die Datenbank)
+COPY prisma ./prisma/
+# Wir installieren die Dependencies
+RUN npm install
 
-**2:**
-
-```dockerfile
-WORKDIR /app
-```
-
-Wir setzen das Arbeitsverzeichnis auf `/app`
-
-<hr/>
-
-**3:**
-
-```dockerfile
-COPY package*.json .
-```
-
-Wir kopieren die `package.json` und `package-lock.json` in das Arbeitsverzeichnis
-
-<hr/>
-
-**4:**
-
-```dockerfile
-RUN npm ci
-```
-
-Wir installieren die Dependencies
-
-<hr/>
-
-**5:**
-
-```dockerfile
+# Wir kopieren den Rest der App in das Arbeitsverzeichnis
 COPY . .
+# Wir öffnen den Port 3221
+EXPOSE 3221
+
+# Wir starten die App mit `npm run start` (siehe package.json, füllt u.a. die Datenbank mit Daten)
+CMD [ "npm", "run", "start" ]
+
+# Healthcheck für den Server (prüft ob der Server läuft) -> wird von Docker verwendet um zu prüfen ob der Server läuft, siehe healthcheck.js
+HEALTHCHECK --interval=5s --timeout=2s --retries=20 \
+    CMD ["node", "healthcheck.js"]
 ```
-
-Wir kopieren den Rest der App in das Arbeitsverzeichnis
-
-<hr/>
-
-**6:**
-
-```dockerfile
-RUN npm run build
-```
-
-Wir bauen die App mit `npm run build` in diesem Fall mit der Adapter `node` [SvelteKit Adapter](https://kit.svelte.dev/docs#adapters)
-
-<hr/>
-
-**7:**
-
-```dockerfile
-RUN npm prune --production
-```
-
-Wir entfernen alle Dependencies die wir nicht für die Produktion brauchen
-
-<hr/>
-
-**8:**
-
-```dockerfile
-FROM node:18-alpine
-```
-
-Wir bauen ein neues Image mit dem Node Image `node:18-alpine`
-
-<hr/>
-
-**9:**
-
-```dockerfile
-WORKDIR /app
-```
-
-Wir setzen das Arbeitsverzeichnis auf `/app`
-
-<hr/>
-
-**10:**
-
-```dockerfile
-COPY --from=builder /app/build build/
-```
-
-Wir kopieren den `build` Ordner aus dem `builder` Image in das Arbeitsverzeichnis
-
-<hr/>
-
-**11:**
-
-```dockerfile
-COPY --from=builder /app/node_modules node_modules/
-```
-
-Wir kopieren den `node_modules` Ordner aus dem `builder` Image in das Arbeitsverzeichnis
-
-<hr/>
-
-**12:**
-
-```dockerfile
-COPY package.json .
-```
-
-Wir kopieren die `package.json` in das Arbeitsverzeichnis
-
-<hr/>
-
-**13:**
-
-```dockerfile
-EXPOSE 5050
-```
-
-Wir öffnen den Port 5050
-
-<hr/>
-
-**14:**
-
-```dockerfile
-ENV NODE_ENV=production PORT=5050
-```
-
-Wir setzen die Umgebungsvariable `NODE_ENV` auf `production` und die Umgebungsvariable `PORT` auf `5050` damit die App für die Produktion gebaut wird und der Port 5050 geöffnet wird.
-
-<hr/>
-
-**15:**
-
-```dockerfile
-CMD [ "node", "build" ]
-```
-
-Wir bauen die App mit `node build`
 
  <font size="10">
  🎉🎉 Fertig! 🎉🎉
  </font>
 
-<hr/>
-<hr/>
 <hr/>
 
 ## FAQ
@@ -197,54 +177,56 @@ Wir setzen die Umgebungsvariable `NODE_ENV` auf `production`, damit SvelteKit di
 
 Weil das nunmal so festgelegt ist. Siehe: `package.json` -> `scripts` -> `build`
 
-## Wie builde ich das Image?
+## Wie starte ich den Server?
 
 ```bash
-docker build . -t sveltekit
+docker compose up
 ```
 
-Warum wird der Tag `-t` auf `sveltekit-example` gesetzt? Weil wir das Image später mit diesem Tag starten wollen.
-
-## Wie starte ich den Container?
+## Wie stoppe ich den Server?
 
 ```bash
-docker run -d -p 5050:5050 --name sveltekit-app sveltekit
+docker compose down
 ```
 
-Warum wird der Tag `-d` gesetzt? Damit der Container im Hintergrund läuft.
-
-Warum wird der Tag `-p` gesetzt? Damit der Port 5050 von außen erreichbar ist.
-
-Warum wird der Tag `--name` gesetzt? Damit wir den Container später mit diesem Namen starten können.
-
-## Wie erreiche ich die App im Browser?
+## Wie starte ich den Server im Hintergrund?
 
 ```bash
-open http://localhost:5050
+docker compose up -d
 ```
 
-## Wie stoppe ich den Container?
+## Wie erreiche ich die Apps?
+
+### Student App
+
+http://localhost:5050
+
+### Prof App
+
+http://localhost:5053
+
+### Adminer
+
+http://localhost:8080
+
+## Wie erreiche ich den Server?
+
+http://localhost:3221
+
+## Wie lösche ich alle Images?
 
 ```bash
-docker stop sveltekit-app
+docker image rm ${IMAGE_ID}
 ```
 
-## Wie starte ich den Container erneut?
+## Wie lösche ich alle Container?
 
 ```bash
-docker start sveltekit-app
+docker container rm ${CONTAINER_ID}
 ```
 
-## Wie lösche ich den Container?
+## Wie lösche ich alle Netzwerke?
 
 ```bash
-docker rm sveltekit-app
-```
-
-Aber Achtung! Wenn du den Container löschst, dann sind alle Daten weg. Wenn du den Container nur stoppst, dann sind die Daten noch da. Außerdem muss der Container gestoppt sein, damit du ihn löschen kannst.
-
-## Wie lösche ich das Image?
-
-```bash
-docker rmi sveltekit
+docker network rm ${NETWORK_ID}
 ```
